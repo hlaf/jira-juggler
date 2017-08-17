@@ -278,6 +278,7 @@ task {id} "{key}: {description}" {{
         self.key = self.DEFAULT_KEY
         self.summary = self.DEFAULT_SUMMARY
         self.properties = {}
+        self.parent = None
 
         if jira_issue:
             self.load_from_jira_issue(jira_issue)
@@ -375,6 +376,7 @@ class JiraJuggler(object):
             list: A list of dicts containing the Jira tickets
         '''
         tasks = []
+        issue_to_task_map = {}
         busy = True
         while busy:
             try:
@@ -390,7 +392,15 @@ class JiraJuggler(object):
 
             for issue in issues:
                 logging.debug('Retrieved %s: %s', issue.key, issue.fields.summary)
-                tasks.append(JugglerTask(issue))
+                task = JugglerTask(issue)
+                issue_to_task_map[issue.key] = (issue, task)
+                tasks.append(task)
+
+        # Add the hierarchy
+        for jira_issue, task in issue_to_task_map.values():
+            if len(jira_issue.fields.subtasks) > 0:
+                for jira_subtask in jira_issue.fields.subtasks:
+                    issue_to_task_map[jira_subtask.key][1].parent = task
 
         self.validate_tasks(tasks)
 

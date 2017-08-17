@@ -269,6 +269,7 @@ class JugglerTask(object):
     TEMPLATE = '''
 task {id} "{key}: {description}" {{
 {props}
+{subtasks}
 }}
 '''
 
@@ -279,6 +280,7 @@ task {id} "{key}: {description}" {{
         self.summary = self.DEFAULT_SUMMARY
         self.properties = {}
         self.parent = None
+        self.children = []
 
         if jira_issue:
             self.load_from_jira_issue(jira_issue)
@@ -319,11 +321,15 @@ task {id} "{key}: {description}" {{
         '''
         props = ''
         for prop in self.properties:
+            if prop == 'effort' and len(self.children) > 0:
+                continue
             props += str(self.properties[prop])
+
         return self.TEMPLATE.format(id=to_identifier(self.key),
                                     key=self.key,
                                     description=self.summary.replace('\"', '\\\"'),
-                                    props=props)
+                                    props=props,
+                                    subtasks=''.join([str(c) for c in self.children]))
 
 class JiraJuggler(object):
 
@@ -400,7 +406,9 @@ class JiraJuggler(object):
         for jira_issue, task in issue_to_task_map.values():
             if len(jira_issue.fields.subtasks) > 0:
                 for jira_subtask in jira_issue.fields.subtasks:
-                    issue_to_task_map[jira_subtask.key][1].parent = task
+                    child_task = issue_to_task_map[jira_subtask.key][1]
+                    child_task.parent = task
+                    task.children.append(child_task)
 
         self.validate_tasks(tasks)
 
@@ -418,8 +426,7 @@ class JiraJuggler(object):
             return None
         if output:
             with open(output, 'w') as out:
-                for issue in issues:
-                    out.write(str(issue))
+                [out.write(str(i)) for i in issues if i.parent is None]
         return issues
 
 if __name__ == "__main__":

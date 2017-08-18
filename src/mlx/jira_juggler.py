@@ -45,6 +45,39 @@ def to_identifier(key):
     '''
     return key.replace('-', '_')
 
+class BigGanttWbs(object):
+
+    def __init__(self):
+        import psycopg2
+        import config as cfg
+        self.conn = psycopg2.connect(host=cfg.jira_server_hostname,
+                                     dbname=cfg.jira_db_name,
+                                     user=cfg.jira_db_user,
+                                     password=cfg.jira_db_pass)
+
+    def get_parent(self, jira_issue):
+
+        cur = self.conn.cursor()
+        tasks_table = 'AO_8AC478_GLOBAL_TASK'
+        wbs_table = 'AO_8AC478_WBS_NODE'
+        issue_id = jira_issue.id
+        cur.execute('SELECT "PARENT_TASK_ID"'
+                    'from "%(tasks_table)s" tasks,'
+                    '      "%(wbs_table)s" wbs '
+                    'where tasks."TASK_ID" = wbs."TASK_ID" and'
+                    '      tasks."TASK_EXT_ID" = \'%(issue_id)s\'' %
+                     locals())
+        rows = cur.fetchall()
+        wbs_parent_id = rows[0][0]
+        cur.execute('SELECT "TASK_EXT_ID"'
+                    'from "%(tasks_table)s" tasks '
+                    'where tasks."TASK_ID" = \'%(wbs_parent_id)s\'' %
+                     locals())
+        rows = cur.fetchall()
+        parent_issue_id = rows[0][0]
+
+        return str(parent_issue_id)
+
 class JugglerTaskProperty(object):
     '''Class for a property of a Task Juggler'''
 
@@ -399,16 +432,26 @@ class JiraJuggler(object):
             for issue in issues:
                 logging.debug('Retrieved %s: %s', issue.key, issue.fields.summary)
                 task = JugglerTask(issue)
-                issue_to_task_map[issue.key] = (issue, task)
+                issue_to_task_map[issue.id] = (issue, task)
                 tasks.append(task)
 
         # Add the hierarchy
         for jira_issue, task in issue_to_task_map.values():
-            if len(jira_issue.fields.subtasks) > 0:
+            if False:
+            #if len(jira_issue.fields.subtasks) > 0: # subtask-based flow
                 for jira_subtask in jira_issue.fields.subtasks:
-                    child_task = issue_to_task_map[jira_subtask.key][1]
+                    child_task = issue_to_task_map[jira_subtask.id][1]
                     child_task.parent = task
                     task.children.append(child_task)
+            else: # get the WBS parent
+                wbs = BigGanttWbs()
+                parent_id = wbs.get_parent(jira_issue)
+                res = issue_to_task_map.get(parent_id)
+                if res:
+                    parent_task = res[1]
+                    task.parent = parent_task
+                    if task not in parent_task.children:
+                        parent_task.children.append(task)
 
         self.validate_tasks(tasks)
 

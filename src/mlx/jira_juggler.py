@@ -21,6 +21,17 @@ JIRA_PAGE_SIZE = 50
 
 TAB = ' ' * 4
 
+resolution = 15
+from dateutil.parser import parse
+from datetime import timedelta
+dt = timedelta(seconds=resolution * 60)
+
+def cv(a):
+    m = divmod(a.minute, resolution)[0] * resolution
+    if m == 0: m = '00'
+    return a.strftime('%Y-%m-%d-%H' + ':%s:00' % m)
+    #return a.strftime('%Y-%m-%d-%H:%M:%S')
+
 def set_logging_level(loglevel):
     '''
     Set the logging level
@@ -314,6 +325,7 @@ task {id} "{key}: {description}" {{
         self.properties = {}
         self.parent = None
         self.children = []
+        self.done = False
 
         if jira_issue:
             self.load_from_jira_issue(jira_issue)
@@ -345,6 +357,13 @@ task {id} "{key}: {description}" {{
         for prop in self.properties:
             self.properties[prop].validate(self, tasks)
 
+    def full_key(self):
+        k = ''
+        if self.parent:
+            k = self.parent.full_key() + '.'
+        k += to_identifier(self.key)
+        return k
+
     def __str__(self):
         '''
         Convert task object to the task juggler syntax
@@ -356,7 +375,17 @@ task {id} "{key}: {description}" {{
         for prop in self.properties:
             if prop == 'effort' and len(self.children) > 0:
                 continue
+            # Handle completed tasks
+            if prop == 'effort' and self.done:
+                props += 'start ' + cv(self.start) + '\n'
+                props += 'end ' + cv(self.end) + '\n'
+                continue
+            if self.done and prop == 'allocate':
+                continue
+            if prop == 'allocate' and len(self.children) > 0:
+                continue
             props += str(self.properties[prop])
+
 
         return self.TEMPLATE.format(id=to_identifier(self.key),
                                     key=self.key,
@@ -417,6 +446,9 @@ class JiraJuggler(object):
         tasks = []
         issue_to_task_map = {}
         busy = True
+        allfields = self.jirahandle.fields()
+        print allfields
+        #import pdb; pdb.set_trace()
         while busy:
             try:
                 issues = self.jirahandle.search_issues(self.query, maxResults=JIRA_PAGE_SIZE, startAt=self.issue_count)
@@ -453,6 +485,125 @@ class JiraJuggler(object):
                     if task not in parent_task.children:
                         parent_task.children.append(task)
 
+        # Add bookings
+        f = file('bookings.tji', 'w')
+        f.write('supplement resource hlaf {\n')
+
+        # Build an interval tree to detect overlaps
+        from intervaltree import Interval, IntervalTree
+        t = IntervalTree()
+
+        tasks_to_book = set()
+        for jira_issue, task in issue_to_task_map.values():
+            if len(task.children) > 0:
+                continue
+            if jira_issue.fields.status.name == 'Done':
+                task.done = True
+                start_date = parse(jira_issue.fields.created)
+                end_date = parse(jira_issue.fields.resolutiondate)
+                duration = end_date - start_date
+
+                # Expand short tasks
+                if duration.total_seconds() < resolution * 60:
+                    #print 'Discarding %s: %s' % (jira_issue.fields.summary,
+                    #                             duration.total_seconds()/60)
+                    # TODO: print a warning message
+                    print 'Expanding %s: %s' % (jira_issue.fields.summary,
+                                                duration.total_seconds()/60)
+                    end_date = start_date + dt
+                    #continue
+                t.add(Interval(start_date, end_date, {task}))
+                tasks_to_book.add(task)
+                task.start, task.end = start_date, end_date
+
+        t.split_overlaps()
+        t.merge_equals(data_reducer=lambda x, y: x.union(y))
+
+        booked_tasks = set()
+
+        assigned_tasks = set()
+
+        def createMap():
+            from collections import defaultdict
+            task_to_interval = defaultdict(set)
+            for i in t:
+                for task in i.data:
+                    if task not in assigned_tasks:
+                        task_to_interval[task].add(i)
+            return task_to_interval
+
+        def buildIntervalCounts(task_to_interval):
+            interval_counts = []
+            for task, intervals in task_to_interval.iteritems():
+                interval_counts.append((len(intervals), task.key, task))
+            return interval_counts
+
+        while len(tasks_to_book) != len(assigned_tasks):
+
+            task_to_interval = createMap()
+
+            # 2. Create a mapping of task to number of available intervals
+            interval_counts = buildIntervalCounts(task_to_interval)
+
+            # 3. Select the label with the lowest interval count
+            interval_counts.sort()
+            task, interval_count = interval_counts[0][2], interval_counts[0][0]
+
+            # 3.1 Check for unsatisfiability
+            if interval_count == 0:
+                sys.exit(-1)
+                return 'UNSAT'
+
+            # 4. Assign the task to the interval with the smallest cardinality
+            interval_slot_count = []
+            for i in task_to_interval[task]:
+                interval_slot_count.append((len(i.data), i))
+            interval_slot_count.sort()
+            interval = interval_slot_count[0][1]
+
+            # 5. Remove the interval from the list of available intervals
+            interval.data.clear()
+            interval.data.add(task)
+
+            # 5.1 Remove the task from the list of assignable tasks
+            assigned_tasks.add(task)
+
+
+        import pdb; pdb.set_trace()
+
+
+        for interval in t:
+            # TODO: Implement a deterministic conflict resolution algorithm
+            d = interval.data.copy()
+            sorted_tasks = sorted(d, key=lambda task: task.key)
+            task = sorted_tasks[0]
+            start_date = interval.begin
+            end_date = interval.end
+
+            # Filter small intervals
+            duration = end_date - start_date
+            if duration.total_seconds() < resolution * 60:
+                print 'Discarding', task.summary, (duration.total_seconds()/60)
+                # TODO: print a warning message
+                continue
+
+            booked_tasks.add(task)
+            start_date = cv(start_date)
+            end_date = cv(end_date)
+
+            f.write('booking EmSo.%s %s - %s { sloppy 2 }\n' % (task.full_key(),
+                                                 start_date,
+                                                 end_date))
+        f.write('}\n')
+        f.close()
+
+        not_booked = tasks_to_book - booked_tasks
+
+        print 'Number of tasks to book:', len(tasks_to_book)
+        print 'Booked tasks:', len(booked_tasks)
+        print 'Not booked tasks:', len(not_booked)
+        for task in not_booked:
+            print 'No bookings for', task.summary
         self.validate_tasks(tasks)
 
         return tasks

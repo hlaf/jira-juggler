@@ -1,5 +1,6 @@
 import unittest
 import numpy as np
+from _collections import defaultdict
 
 class TestGaleShapley(unittest.TestCase):
 
@@ -162,6 +163,59 @@ class TestGaleShapley(unittest.TestCase):
         
         m2 = self._buildIncidenceMatrix(program_prefs.keys(),
                                         applicant_prefs.keys(),
+                                        actual_assignment)
+
+        assert np.array_equal(m1, np.transpose(m2))
+        
+    def test_nrmp_cookrn_stable_match(self):
+        '''
+        NRMP test case from the cookrn/stable_match project available at:
+            https://github.com/cookrn/stable_match
+        '''
+        
+        programs = {
+          'mercy'   : ['chen', 'garcia'],
+          'city'    : ['garcia', 'hassan', 'eastman', 'anderson', 'brown', 'chen', 'davis', 'ford'],
+          'general' : ['brown', 'eastman', 'hassan', 'anderson', 'chen', 'davis', 'garcia'],
+          'state'   : ['brown', 'eastman', 'anderson', 'chen', 'hassan', 'ford', 'davis', 'garcia'],
+        }
+
+        program_slots = defaultdict(lambda: 2)
+
+        applicants = {
+          'anderson' : [ 'city' ],
+          'brown'    : [ 'city'  , 'mercy' ],
+          'chen'     : [ 'city'  , 'mercy' ],
+          'davis'    : [ 'mercy' , 'city'    , 'general' , 'state'   ],
+          'eastman'  : [ 'city'  , 'mercy'   , 'state'   , 'general' ],
+          'ford'     : [ 'city'  , 'general' , 'mercy'   , 'state'   ],
+          'garcia'   : [ 'city'  , 'mercy'   , 'state'   , 'general' ],
+          'hassan'   : [ 'state' , 'city'    , 'mercy'   , 'general' ]
+        }
+
+        applicants_expectations = {
+          'anderson' : [],
+          'brown'    : [],
+          'chen'     : [ 'mercy' ],
+          'davis'    : [ 'general' ],
+          'eastman'  : [ 'city' ],
+          'ford'     : [ 'state' ],
+          'garcia'   : [ 'city' ],
+          'hassan'   : [ 'state' ]
+        }
+        
+        from emt.gale_shapley import deferred_acceptance
+
+        actual_assignment = deferred_acceptance(applicants,
+                                                programs,
+                                                program_slots)
+
+        m1 = self._buildIncidenceMatrix(applicants.keys(),
+                                        programs.keys(),
+                                        applicants_expectations)
+        
+        m2 = self._buildIncidenceMatrix(programs.keys(),
+                                        applicants.keys(),
                                         actual_assignment)
 
         assert np.array_equal(m1, np.transpose(m2))

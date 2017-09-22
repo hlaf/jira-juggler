@@ -1,4 +1,3 @@
-import copy
 from collections import defaultdict
 import heapq
 
@@ -17,7 +16,7 @@ def deferred_acceptance(student_prefs, program_prefs, program_slots=None):
     students = sorted(student_prefs.keys())
     unmatched_students = set(students)
     matchings = defaultdict(list)
-    student_options = copy.deepcopy(student_prefs)
+    student_options = dict((s, list(prefs)) for s, prefs in student_prefs.iteritems())
     while unmatched_students:
         student = unmatched_students.pop()
         #print("%s is on the market" % (student))

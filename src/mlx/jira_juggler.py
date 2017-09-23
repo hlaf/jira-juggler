@@ -325,14 +325,14 @@ task {id} "{key}: {description}" {{
         self.key = self.DEFAULT_KEY
         self.summary = self.DEFAULT_SUMMARY
         self.properties = {}
-        self.parent = None
         self.children = []
-        self.done = False
+        self._issue = jira_issue
+        self._parent = None
 
         if jira_issue:
-            self.load_from_jira_issue(jira_issue)
+            self._load_from_jira_issue(jira_issue)
 
-    def load_from_jira_issue(self, jira_issue):
+    def _load_from_jira_issue(self, jira_issue):
         '''
         Load the object with data from a Jira issue
 
@@ -344,6 +344,12 @@ task {id} "{key}: {description}" {{
         self.properties['allocate'] = JugglerTaskAllocate(jira_issue)
         self.properties['effort'] = JugglerTaskEffort(jira_issue)
         self.properties['depends'] = JugglerTaskDepends(jira_issue)
+
+    def isDone(self):
+        return self._issue.fields.status.name == 'Done'
+
+    def setParent(self, parent):
+        self._parent = parent
 
     def validate(self, tasks):
         '''
@@ -361,8 +367,8 @@ task {id} "{key}: {description}" {{
 
     def full_key(self):
         k = ''
-        if self.parent:
-            k = self.parent.full_key() + '.'
+        if self._parent:
+            k = self._parent.full_key() + '.'
         k += to_identifier(self.key)
         return k
 
@@ -378,11 +384,11 @@ task {id} "{key}: {description}" {{
             if prop == 'effort' and len(self.children) > 0:
                 continue
             # Handle completed tasks
-            if prop == 'effort' and self.done:
+            if prop == 'effort' and self.isDone():
                 props += 'start ' + cv(self.start) + '\n'
                 props += 'end ' + cv(self.end) + '\n'
                 continue
-            if self.done and prop == 'allocate':
+            if self.isDone() and prop == 'allocate':
                 continue
             if prop == 'allocate' and len(self.children) > 0:
                 continue
@@ -425,7 +431,6 @@ class JiraJuggler(object):
 
         logging.info('Query: %s', query)
         self.query = query
-        self.issue_count = 0
 
     @staticmethod
     def validate_tasks(tasks):
@@ -439,16 +444,17 @@ class JiraJuggler(object):
             task.validate(tasks)
 
     @staticmethod
-    def buildTree(issue_to_task_map):
+    def buildTree(tasks):
         
         from intervaltree import Interval, IntervalTree
         t = IntervalTree()
 
-        for jira_issue, task in issue_to_task_map.values():
+        for task in tasks:
+            jira_issue = task._issue
+            
             if len(task.children) > 0:
                 continue
-            if jira_issue.fields.status.name == 'Done':
-                task.done = True
+            if task.isDone():
                 start_date = parse(jira_issue.fields.created)
                 end_date = parse(jira_issue.fields.resolutiondate)
                 duration = end_date - start_date
@@ -470,6 +476,34 @@ class JiraJuggler(object):
         
         return t
 
+    def createTask(self, issue):
+        task = JugglerTask(issue)
+        if not hasattr(self, '_tasks'):
+            self._tasks = {}
+        self._tasks[issue.id] = task
+        return task
+
+    def addHierarchy(self):
+        hierarchy_type = 'BIG_GANTT'
+        
+        if hierarchy_type == 'BIG_GANTT':
+            wbs = BigGanttWbs()
+
+        for task in self._tasks.values():
+            if hierarchy_type != 'BIG_GANTT': # subtask-based flow
+                for jira_subtask in task._issue.fields.subtasks:
+                    child_task = self._tasks.get(jira_subtask.id)
+                    child_task.setParent(task)
+                    task.children.append(child_task)
+            else: # get the WBS parent
+                parent_id = wbs.get_parent(task._issue)
+                parent_task = self._tasks.get(parent_id, None)
+                if not parent_task:
+                    continue
+                task.setParent(parent_task)
+                if task not in parent_task.children:
+                    parent_task.children.append(task)
+
     def load_issues_from_jira(self):
         '''
         Load issues from Jira
@@ -478,14 +512,11 @@ class JiraJuggler(object):
             list: A list of dicts containing the Jira tickets
         '''
         tasks = []
-        issue_to_task_map = {}
         busy = True
-        allfields = self.jirahandle.fields()
-        print allfields
-        #import pdb; pdb.set_trace()
+        issue_count = 0
         while busy:
             try:
-                issues = self.jirahandle.search_issues(self.query, maxResults=JIRA_PAGE_SIZE, startAt=self.issue_count)
+                issues = self.jirahandle.search_issues(self.query, maxResults=JIRA_PAGE_SIZE, startAt=issue_count)
             except JIRAError:
                 logging.error('Invalid Jira query "%s"', self.query)
                 return None
@@ -493,31 +524,14 @@ class JiraJuggler(object):
             if len(issues) <= 0:
                 busy = False
 
-            self.issue_count += len(issues)
+            issue_count += len(issues)
 
             for issue in issues:
                 logging.debug('Retrieved %s: %s', issue.key, issue.fields.summary)
-                task = JugglerTask(issue)
-                issue_to_task_map[issue.id] = (issue, task)
+                task = self.createTask(issue)
                 tasks.append(task)
 
-        # Add the hierarchy
-        for jira_issue, task in issue_to_task_map.values():
-            if False:
-            #if len(jira_issue.fields.subtasks) > 0: # subtask-based flow
-                for jira_subtask in jira_issue.fields.subtasks:
-                    child_task = issue_to_task_map[jira_subtask.id][1]
-                    child_task.parent = task
-                    task.children.append(child_task)
-            else: # get the WBS parent
-                wbs = BigGanttWbs()
-                parent_id = wbs.get_parent(jira_issue)
-                res = issue_to_task_map.get(parent_id)
-                if res:
-                    parent_task = res[1]
-                    task.parent = parent_task
-                    if task not in parent_task.children:
-                        parent_task.children.append(task)
+        self.addHierarchy()
 
         # Process completed tasks
         
@@ -526,7 +540,7 @@ class JiraJuggler(object):
         f.write('supplement resource hlaf {\n')
 
         # Detect overlaps using an interval tree
-        t = self.buildTree(issue_to_task_map)
+        t = self.buildTree(tasks)
         
         # Solve the task to booking assignment problem using Gale & Shapley's
         # deferred acceptance algorithm
@@ -557,8 +571,6 @@ class JiraJuggler(object):
             for i in assigned_intervals:
                 interval_prefs.pop(i)
 
-        #print mapping
-
         for task, intervals in mapping.iteritems():
             for interval in intervals:
                 start_date = interval.begin
@@ -577,6 +589,7 @@ class JiraJuggler(object):
         self.validate_tasks(tasks)
 
         return tasks
+        #return mapping.keys()
 
     def juggle(self, output=None):
         '''
@@ -590,7 +603,7 @@ class JiraJuggler(object):
             return None
         if output:
             with open(output, 'w') as out:
-                [out.write(str(i)) for i in issues if i.parent is None]
+                [out.write(str(i)) for i in issues if i._parent is None]
         return issues
 
 if __name__ == "__main__":

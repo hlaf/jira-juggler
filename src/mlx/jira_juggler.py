@@ -13,6 +13,8 @@ import logging
 
 from jira import JIRA, JIRAError
 
+from emt.utils import to_identifier, cv
+
 DEFAULT_LOGLEVEL = 'warning'
 DEFAULT_JIRA_URL = 'https://jira.melexis.com/jira'
 DEFAULT_JIRA_USER = 'swcc'
@@ -22,17 +24,13 @@ DEFAULT_OUTPUT = 'jira_export.tjp'
 JIRA_PAGE_SIZE = 50
 
 TAB = ' ' * 4
+from emt import utils
 
-resolution = 15
+resolution = utils.resolution
+
 from dateutil.parser import parse
 from datetime import timedelta
 dt = timedelta(seconds=resolution * 60)
-
-def cv(a):
-    m = divmod(a.minute, resolution)[0] * resolution
-    if m == 0: m = '00'
-    return a.strftime('%Y-%m-%d-%H' + ':%s:00' % m)
-    #return a.strftime('%Y-%m-%d-%H:%M:%S')
 
 def set_logging_level(loglevel):
     '''
@@ -45,18 +43,6 @@ def set_logging_level(loglevel):
     if not isinstance(numeric_level, int):
         raise ValueError('Invalid log level: %s' % loglevel)
     logging.basicConfig(level=numeric_level)
-
-def to_identifier(key):
-    '''
-    Convert given key to identifier, interpretable by TaskJuggler as a task-identifier
-
-    Args:
-        key (str): Key to be converted
-
-    Returns:
-        str: Valid task-identifier based on given key
-    '''
-    return key.replace('-', '_')
 
 class BigGanttWbs(object):
 
@@ -312,12 +298,6 @@ class JugglerTask(object):
 
     DEFAULT_KEY = 'NOT_INITIALIZED'
     DEFAULT_SUMMARY = 'Task is not initialized'
-    TEMPLATE = '''
-task {id} "{key}: {description}" {{
-{props}
-{subtasks}
-}}
-'''
 
     def __init__(self, jira_issue=None):
         logging.info('Create JugglerTask for %s', jira_issue.key)
@@ -351,6 +331,17 @@ task {id} "{key}: {description}" {{
     def setParent(self, parent):
         self._parent = parent
 
+    def getParent(self):
+        return self._parent
+
+    def getAncestors(self):
+        ancestors = []
+        curr = self
+        while curr.getParent():
+            curr = curr.getParent()
+            ancestors.append(curr)
+        return ancestors
+    
     def validate(self, tasks):
         '''
         Validate (and correct) the current task
@@ -371,35 +362,6 @@ task {id} "{key}: {description}" {{
             k = self._parent.full_key() + '.'
         k += to_identifier(self.key)
         return k
-
-    def __str__(self):
-        '''
-        Convert task object to the task juggler syntax
-
-        Returns:
-            str: String representation of the task in juggler syntax
-        '''
-        props = ''
-        for prop in self.properties:
-            if prop == 'effort' and len(self.children) > 0:
-                continue
-            # Handle completed tasks
-            if prop == 'effort' and self.isDone():
-                props += 'start ' + cv(self.start) + '\n'
-                props += 'end ' + cv(self.end) + '\n'
-                continue
-            if self.isDone() and prop == 'allocate':
-                continue
-            if prop == 'allocate' and len(self.children) > 0:
-                continue
-            props += str(self.properties[prop])
-
-
-        return self.TEMPLATE.format(id=to_identifier(self.key),
-                                    key=self.key,
-                                    description=self.summary.replace('\"', '\\\"'),
-                                    props=props,
-                                    subtasks=''.join([str(c) for c in self.children]))
 
 class JiraJuggler(object):
 
@@ -454,22 +416,21 @@ class JiraJuggler(object):
             
             if len(task.children) > 0:
                 continue
-            if task.isDone():
-                start_date = parse(jira_issue.fields.created)
-                end_date = parse(jira_issue.fields.resolutiondate)
-                duration = end_date - start_date
+            start_date = parse(jira_issue.fields.created)
+            end_date = parse(jira_issue.fields.resolutiondate)
+            duration = end_date - start_date
 
-                # Expand short tasks
-                if duration.total_seconds() < resolution * 60:
-                    #print 'Discarding %s: %s' % (jira_issue.fields.summary,
-                    #                             duration.total_seconds()/60)
-                    # TODO: print a warning message
-                    print 'Expanding %s: %s' % (jira_issue.fields.summary,
-                                                duration.total_seconds()/60)
-                    end_date = start_date + dt
-                    #continue
-                t.add(Interval(start_date, end_date, {task}))
-                task.start, task.end = start_date, end_date
+            # Expand short tasks
+            if duration.total_seconds() < resolution * 60:
+                #print 'Discarding %s: %s' % (jira_issue.fields.summary,
+                #                             duration.total_seconds()/60)
+                # TODO: print a warning message
+                print 'Expanding %s: %s' % (jira_issue.fields.summary,
+                                            duration.total_seconds()/60)
+                end_date = start_date + dt
+                #continue
+            t.add(Interval(start_date, end_date, {task}))
+            task.start, task.end = start_date, end_date
 
         t.split_overlaps()
         t.merge_equals(data_reducer=lambda x, y: x.union(y))
@@ -483,9 +444,7 @@ class JiraJuggler(object):
         self._tasks[issue.id] = task
         return task
 
-    def addHierarchy(self):
-        hierarchy_type = 'BIG_GANTT'
-        
+    def addHierarchy(self, hierarchy_type='BIG_GANTT'):
         if hierarchy_type == 'BIG_GANTT':
             wbs = BigGanttWbs()
 
@@ -534,13 +493,14 @@ class JiraJuggler(object):
         self.addHierarchy()
 
         # Process completed tasks
+        completed_tasks = [t for t in tasks if t.isDone()]
         
         # Add bookings
         f = file('bookings.tji', 'w')
         f.write('supplement resource hlaf {\n')
 
         # Detect overlaps using an interval tree
-        t = self.buildTree(tasks)
+        t = self.buildTree(completed_tasks)
         
         # Solve the task to booking assignment problem using Gale & Shapley's
         # deferred acceptance algorithm
@@ -586,10 +546,7 @@ class JiraJuggler(object):
         f.write('}\n')
         f.close()
 
-        self.validate_tasks(tasks)
-
         return tasks
-        #return mapping.keys()
 
     def juggle(self, output=None):
         '''
@@ -602,8 +559,20 @@ class JiraJuggler(object):
         if not issues:
             return None
         if output:
+            
+            from emt.io.formatters import TaskJugglerFormatter
+            
+            all_ancestors = set()
+            for i in filter(lambda x: x.isDone(), issues):
+                all_ancestors.update(i.getAncestors())
+            
+            formatter = TaskJugglerFormatter(lambda x: x.isDone() or x in all_ancestors)
+             
             with open(output, 'w') as out:
-                [out.write(str(i)) for i in issues if i._parent is None]
+                for issue in issues:
+                    if not issue.getParent():
+                        out.write(formatter.format(issue))
+            
         return issues
 
 if __name__ == "__main__":
